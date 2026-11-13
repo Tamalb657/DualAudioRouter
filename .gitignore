@@ -1,0 +1,20 @@
+## Build Results & Intermediates
+[Bb]in/
+[Oo]bj/
+*.pdb
+*.log
+
+## Visual Studio & JetBrains Cache
+.vs/
+.vscode/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+## Temporary / Test folders
+Test_Size/
+
+## Loose large legacy test binaries (>100MB)
+DualAudioRouter (*).exe
+DualAudioRouter.exe

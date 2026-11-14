@@ -32,7 +32,7 @@ Ensure you have the [.NET 8 SDK](https://dotnet.microsoft.com/download/dotnet/8.
 ```bash
 # Clone the repository
 git clone https://github.com/Tamalb657/DualAudioRouter.git
-cd DualAudioRouter/DualAudioRouterWPF
+cd DualAudioRouter/DualAudioRouter
 
 # Build Release
 dotnet build -c Release
@@ -45,7 +45,7 @@ dotnet publish -c Release -r win-x64 --self-contained false -p:PublishSingleFile
 
 ## 🛠️ Architecture
 
-- **UI Layer (`DualAudioRouterWPF`):**
+- **UI Layer (`DualAudioRouter`):**
   - Modern Windows 11 Fluent dark theme utilizing `WPF-UI` and ClearType subpixel rendering.
   - MVVM pattern (`MainViewModel`, `OutputRowViewModel`) for clean separation of concerns.
 - **Audio Engine (`AudioEngine.cs`):**

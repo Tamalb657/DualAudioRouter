@@ -6,7 +6,7 @@ using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Windows.Threading;
 
-namespace DualAudioRouterWPF
+namespace DualAudioRouter
 {
     public class MainViewModel : INotifyPropertyChanged
     {

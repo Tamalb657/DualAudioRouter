@@ -2,7 +2,7 @@
 using System.IO;
 using System.Windows;
 
-namespace DualAudioRouterWPF
+namespace DualAudioRouter
 {
     public partial class App : System.Windows.Application
     {

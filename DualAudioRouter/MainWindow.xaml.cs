@@ -6,7 +6,7 @@ using System.Windows;
 using System.Windows.Forms;
 using Wpf.Ui.Controls;
 
-namespace DualAudioRouterWPF
+namespace DualAudioRouter
 {
     public partial class MainWindow : FluentWindow
     {

@@ -4,7 +4,7 @@ using System.Runtime.InteropServices;
 using NAudio.CoreAudioApi;
 using NAudio.Wave;
 
-namespace DualAudioRouterWPF
+namespace DualAudioRouter
 {
     public class AudioEngine : IDisposable
     {

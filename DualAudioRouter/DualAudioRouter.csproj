@@ -3,21 +3,28 @@
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
     <TargetFramework>net8.0-windows</TargetFramework>
-    <Nullable>disable</Nullable>
-    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
-
-    <!-- Set EXE icon -->
+    <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>
     <ApplicationIcon>app.ico</ApplicationIcon>
+    <AssemblyName>DualAudioRouter</AssemblyName>
+
+    <!-- Single File Executable Settings -->
+    <PublishSingleFile>true</PublishSingleFile>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
   </PropertyGroup>
 
   <ItemGroup>
-    <!-- Embed app.ico directly into assembly -->
-    <EmbeddedResource Include="app.ico" />
+    <Resource Include="app.ico" />
+    <None Update="app.ico">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
   </ItemGroup>
 
   <ItemGroup>
     <PackageReference Include="NAudio" Version="2.3.0" />
+    <PackageReference Include="WPF-UI" Version="4.3.0" />
   </ItemGroup>
 
 </Project>

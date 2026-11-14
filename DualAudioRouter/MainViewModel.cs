@@ -265,7 +265,7 @@ namespace DualAudioRouter
                     BassBoost = r.BassBoost
                 }).ToList();
 
-                var res = engine.Start(SelectedMasterDevice.Id, configs, latency, SyncDelayMs);
+                var res = engine.Start(SelectedMasterDevice.Id, configs, latency, SyncDelayMs, ExclusiveMode);
                 if (res.Success)
                 {
                     IsRouting = true;
@@ -286,6 +286,30 @@ namespace DualAudioRouter
         {
             peakTimer.Stop();
             engine.Dispose();
+        }
+
+        public void UpdateChannelVolume(string? deviceId, float volume)
+        {
+            if (deviceId != null && isRouting)
+            {
+                engine.SetOutputVolume(deviceId, volume);
+            }
+        }
+
+        public void UpdateChannelMute(string? deviceId, bool isMuted)
+        {
+            if (deviceId != null && isRouting)
+            {
+                engine.SetOutputMuted(deviceId, isMuted);
+            }
+        }
+
+        public void UpdateChannelBassBoost(string? deviceId, bool bassBoost)
+        {
+            if (deviceId != null && isRouting)
+            {
+                engine.SetOutputBassBoost(deviceId, bassBoost);
+            }
         }
 
         public event PropertyChangedEventHandler? PropertyChanged;
@@ -332,7 +356,10 @@ namespace DualAudioRouter
             set
             {
                 if (SetField(ref volume, value))
+                {
                     OnPropertyChanged(nameof(VolumeLabel));
+                    parent.UpdateChannelVolume(SelectedDevice?.Id, (float)(value / 100.0));
+                }
             }
         }
 
@@ -347,6 +374,7 @@ namespace DualAudioRouter
                 {
                     OnPropertyChanged(nameof(MuteButtonText));
                     OnPropertyChanged(nameof(MuteButtonAppearance));
+                    parent.UpdateChannelMute(SelectedDevice?.Id, value);
                 }
             }
         }
@@ -357,7 +385,13 @@ namespace DualAudioRouter
         public bool BassBoost
         {
             get => bassBoost;
-            set => SetField(ref bassBoost, value);
+            set
+            {
+                if (SetField(ref bassBoost, value))
+                {
+                    parent.UpdateChannelBassBoost(SelectedDevice?.Id, value);
+                }
+            }
         }
 
         public OutputRowViewModel(MainViewModel parent, int index, IEnumerable<AudioDeviceInfo> available, AudioDeviceInfo selected)

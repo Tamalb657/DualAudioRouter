@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Runtime.InteropServices;
 using NAudio.CoreAudioApi;
 using NAudio.Wave;
@@ -35,7 +36,7 @@ namespace DualAudioRouter
             return result;
         }
 
-        public StartResult Start(string captureDeviceId, List<OutputConfig> outputs, int latency, int delay)
+        public StartResult Start(string captureDeviceId, List<OutputConfig> outputs, int latency, int delay, bool exclusiveMode = false)
         {
             if (isRunning) return new StartResult { Success = false, Error = "Engine is already running" };
 
@@ -63,8 +64,6 @@ namespace DualAudioRouter
 
                 foreach (var cfg in outputs)
                 {
-                    if (cfg.IsMuted) continue;
-
                     MMDevice? outDev = null;
                     foreach (var dev in enumerator.EnumerateAudioEndPoints(DataFlow.Render, DeviceState.Active))
                     {
@@ -77,13 +76,21 @@ namespace DualAudioRouter
 
                     if (outDev != null)
                     {
-                        var ch = new OutputChannel(outDev, capture.WaveFormat, latencyMs, delayMs, cfg.Volume / 100f, cfg.BassBoost);
+                        var ch = new OutputChannel(
+                            outDev,
+                            capture.WaveFormat,
+                            latencyMs,
+                            delayMs,
+                            cfg.Volume / 100f,
+                            cfg.IsMuted,
+                            cfg.BassBoost,
+                            exclusiveMode);
                         channels.Add(ch);
                     }
                 }
 
                 if (channels.Count == 0)
-                    return new StartResult { Success = false, Error = "No active output destinations selected" };
+                    return new StartResult { Success = false, Error = "No output destinations found" };
 
                 capture.DataAvailable += OnCaptureDataAvailable;
                 capture.StartRecording();
@@ -104,6 +111,33 @@ namespace DualAudioRouter
             }
         }
 
+        public void SetOutputMuted(string deviceId, bool isMuted)
+        {
+            lock (channels)
+            {
+                var ch = channels.FirstOrDefault(c => c.DeviceId == deviceId);
+                if (ch != null) ch.IsMuted = isMuted;
+            }
+        }
+
+        public void SetOutputVolume(string deviceId, float volume)
+        {
+            lock (channels)
+            {
+                var ch = channels.FirstOrDefault(c => c.DeviceId == deviceId);
+                if (ch != null) ch.Volume = Math.Clamp(volume, 0f, 1f);
+            }
+        }
+
+        public void SetOutputBassBoost(string deviceId, bool bassBoost)
+        {
+            lock (channels)
+            {
+                var ch = channels.FirstOrDefault(c => c.DeviceId == deviceId);
+                if (ch != null) ch.BassBoost = bassBoost;
+            }
+        }
+
         private void OnCaptureDataAvailable(object? sender, WaveInEventArgs e)
         {
             if (e.BytesRecorded <= 0 || capture == null) return;
@@ -112,7 +146,7 @@ namespace DualAudioRouter
             var format = capture.WaveFormat;
 
             // Zero-allocation SIMD-friendly span peak measurement
-            if (format.Encoding == WaveFormatEncoding.IeeeFloat && format.BitsPerSample == 32)
+            if (format.BitsPerSample == 32)
             {
                 ReadOnlySpan<float> floatSpan = MemoryMarshal.Cast<byte, float>(e.Buffer.AsSpan(0, e.BytesRecorded));
                 int chCount = format.Channels;
@@ -148,9 +182,12 @@ namespace DualAudioRouter
             PeakDataAvailable?.Invoke(peakL, peakR);
 
             // Fan out to active channels
-            for (int i = 0; i < channels.Count; i++)
+            lock (channels)
             {
-                channels[i].AddSamples(e.Buffer, e.BytesRecorded);
+                for (int i = 0; i < channels.Count; i++)
+                {
+                    channels[i].AddSamples(e.Buffer, e.BytesRecorded);
+                }
             }
         }
 
@@ -160,11 +197,14 @@ namespace DualAudioRouter
             try { capture?.Dispose(); } catch { }
             capture = null;
 
-            for (int i = 0; i < channels.Count; i++)
+            lock (channels)
             {
-                try { channels[i].Dispose(); } catch { }
+                for (int i = 0; i < channels.Count; i++)
+                {
+                    try { channels[i].Dispose(); } catch { }
+                }
+                channels.Clear();
             }
-            channels.Clear();
             isRunning = false;
         }
 
@@ -176,71 +216,143 @@ namespace DualAudioRouter
 
     public class OutputChannel : IDisposable
     {
+        public string DeviceId { get; }
         private readonly WasapiOut playback;
         private readonly BufferedWaveProvider buffer;
-        private readonly float volume;
-        private readonly bool bassBoost;
+        public volatile bool IsMuted;
+        public volatile float Volume = 1.0f;
+        public volatile bool BassBoost;
+
+        // Biquad low-shelf filter parameters (+3dB below 120Hz)
+        private float b0, b1, b2, a1, a2;
+        private float x1_L, x2_L, y1_L, y2_L;
+        private float x1_R, x2_R, y1_R, y2_R;
+        private bool biquadInitialized;
+
         private byte[] processBuffer = new byte[8192];
 
-        public OutputChannel(MMDevice device, WaveFormat format, int latencyMs, int delayMs, float vol, bool bass)
+        public OutputChannel(MMDevice device, WaveFormat format, int latencyMs, int delayMs, float vol, bool isMuted, bool bass, bool exclusiveMode)
         {
-            volume = vol;
-            bassBoost = bass;
+            DeviceId = device.ID;
+            Volume = vol;
+            IsMuted = isMuted;
+            BassBoost = bass;
 
+            InitBiquad(format.SampleRate, 120.0f, 3.0f);
+
+            // 2-second buffer capacity prevents packet discard on CPU/scheduling spikes
             buffer = new BufferedWaveProvider(format)
             {
-                BufferDuration = TimeSpan.FromMilliseconds(100 + delayMs),
+                BufferDuration = TimeSpan.FromSeconds(2),
                 DiscardOnBufferOverflow = true,
                 ReadFully = true
             };
 
-            playback = new WasapiOut(device, AudioClientShareMode.Shared, false, latencyMs);
-            playback.Init(buffer);
+            // Event-Sync mode provides lowest jitter and aligns with hardware audio clock
+            var shareMode = exclusiveMode ? AudioClientShareMode.Exclusive : AudioClientShareMode.Shared;
+            try
+            {
+                playback = new WasapiOut(device, shareMode, true, latencyMs);
+                playback.Init(buffer);
+            }
+            catch
+            {
+                // Graceful fallback to shared timer mode if driver doesn't support EventSync or Exclusive
+                playback = new WasapiOut(device, AudioClientShareMode.Shared, false, latencyMs);
+                playback.Init(buffer);
+            }
             playback.Play();
+        }
+
+        private void InitBiquad(int sampleRate, float f0, float gainDb)
+        {
+            float A = MathF.Pow(10f, gainDb / 40f);
+            float omega = 2f * MathF.PI * f0 / sampleRate;
+            float sn = MathF.Sin(omega);
+            float cs = MathF.Cos(omega);
+            float alpha = sn / 2f * MathF.Sqrt(2f);
+            float beta = 2f * MathF.Sqrt(A) * alpha;
+
+            float a0 = (A + 1f) + (A - 1f) * cs + beta;
+            b0 = (A * ((A + 1f) - (A - 1f) * cs + beta)) / a0;
+            b1 = (2f * A * ((A - 1f) - (A + 1f) * cs)) / a0;
+            b2 = (A * ((A + 1f) - (A - 1f) * cs - beta)) / a0;
+            a1 = (-2f * ((A - 1f) + (A + 1f) * cs)) / a0;
+            a2 = ((A + 1f) + (A - 1f) * cs - beta) / a0;
+            biquadInitialized = true;
         }
 
         public void AddSamples(byte[] data, int count)
         {
             if (count <= 0) return;
 
-            // Reuse existing processBuffer without heap allocations
             if (processBuffer.Length < count)
             {
                 processBuffer = new byte[Math.Max(count, processBuffer.Length * 2)];
             }
 
+            // If muted, deliver silence to keep buffer streaming without playing sound
+            if (IsMuted)
+            {
+                Array.Clear(processBuffer, 0, count);
+                buffer.AddSamples(processBuffer, 0, count);
+                return;
+            }
+
+            float curVol = Volume;
+            bool curBass = BassBoost;
+
+            // BIT-PERFECT BYPASS: If volume is 100% and BassBoost is off,
+            // stream original captured bits directly without any math or modification!
+            if (Math.Abs(curVol - 1.0f) <= 0.001f && !curBass)
+            {
+                buffer.AddSamples(data, 0, count);
+                return;
+            }
+
             Span<byte> targetSpan = processBuffer.AsSpan(0, count);
             data.AsSpan(0, count).CopyTo(targetSpan);
 
-            // DSP Gain and Bass Boost in-place without BitConverter allocations
-            if (Math.Abs(volume - 1.0f) > 0.001f || bassBoost)
+            var format = buffer.WaveFormat;
+            if (format.BitsPerSample == 32)
             {
-                var format = buffer.WaveFormat;
-                if (format.Encoding == WaveFormatEncoding.IeeeFloat && format.BitsPerSample == 32)
+                Span<float> floatSpan = MemoryMarshal.Cast<byte, float>(targetSpan);
+                int chCount = format.Channels;
+
+                for (int i = 0; i < floatSpan.Length; i += chCount)
                 {
-                    Span<float> floatSpan = MemoryMarshal.Cast<byte, float>(targetSpan);
-                    for (int i = 0; i < floatSpan.Length; i++)
+                    // Left Channel
+                    float l = floatSpan[i] * curVol;
+                    if (curBass && biquadInitialized)
                     {
-                        float sample = floatSpan[i] * volume;
-                        if (bassBoost)
+                        float y = b0 * l + b1 * x1_L + b2 * x2_L - a1 * y1_L - a2 * y2_L;
+                        x2_L = x1_L; x1_L = l;
+                        y2_L = y1_L; y1_L = y;
+                        l = Math.Clamp(y, -1.0f, 1.0f);
+                    }
+                    floatSpan[i] = l;
+
+                    // Right Channel
+                    if (chCount > 1 && i + 1 < floatSpan.Length)
+                    {
+                        float r = floatSpan[i + 1] * curVol;
+                        if (curBass && biquadInitialized)
                         {
-                            sample = Math.Clamp(sample * 1.15f, -1.0f, 1.0f);
+                            float y = b0 * r + b1 * x1_R + b2 * x2_R - a1 * y1_R - a2 * y2_R;
+                            x2_R = x1_R; x1_R = r;
+                            y2_R = y1_R; y1_R = y;
+                            r = Math.Clamp(y, -1.0f, 1.0f);
                         }
-                        floatSpan[i] = sample;
+                        floatSpan[i + 1] = r;
                     }
                 }
-                else if (format.BitsPerSample == 16)
+            }
+            else if (format.BitsPerSample == 16)
+            {
+                Span<short> shortSpan = MemoryMarshal.Cast<byte, short>(targetSpan);
+                for (int i = 0; i < shortSpan.Length; i++)
                 {
-                    Span<short> shortSpan = MemoryMarshal.Cast<byte, short>(targetSpan);
-                    for (int i = 0; i < shortSpan.Length; i++)
-                    {
-                        float val = shortSpan[i] * volume;
-                        if (bassBoost)
-                        {
-                            val = Math.Clamp(val * 1.15f, short.MinValue, short.MaxValue);
-                        }
-                        shortSpan[i] = (short)Math.Clamp((int)val, short.MinValue, short.MaxValue);
-                    }
+                    shortSpan[i] = (short)Math.Clamp((int)(shortSpan[i] * curVol), short.MinValue, short.MaxValue);
                 }
             }
 
